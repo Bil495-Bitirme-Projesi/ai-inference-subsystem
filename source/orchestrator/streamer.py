@@ -2,12 +2,12 @@ import numpy as np
 import cv2
 from queue import Queue, Empty, Full
 from typing import Callable, Optional
-import threading
+from threading import Thread
 import logging
 import time
 
 
-class Streamer:
+class Streamer(Thread):
     def __init__(
         self,
         name: str = "DefaultStreamer",
@@ -17,6 +17,7 @@ class Streamer:
         buffer_size: int = 10,
     ):
         super().__init__(name=name, daemon=True)
+        self.name = name
         self.url = url
         self.max_retries = max_retries
         self.frame_callback = frame_callback
@@ -27,6 +28,8 @@ class Streamer:
         self.frame_queue = Queue(maxsize=buffer_size)
         self.running = False
         self.connected = False
+        self._is_file = False
+        self._fps = 0.0
 
         self.logger = logging.getLogger(self.name)
 
@@ -64,14 +67,43 @@ class Streamer:
 
         self.connected = True
         self.logger.info(f"Bağlantı başarılı: {self.url}")
+        
+        # Dosya olup olmadığını kontrol et
+        self._is_file = not (str(self.url).startswith("rtsp://") or str(self.url).startswith("http://"))
+        self._fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if self._fps <= 0:
+            self._fps = 30.0 # Default
+            
         return True
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    @property
+    def fps(self) -> float:
+        return self._fps
 
     def _stream_loop(self):
         """Görüntü yakalama döngüsü."""
+        last_time = time.time()
+        frame_delay = 1.0 / self._fps if self._fps > 0 else 0.033
+
         while self.running and self.connected:
+            if self._is_file:
+                # Dosya okurken gerçek zamanlı hızı koru
+                elapsed = time.time() - last_time
+                if elapsed < frame_delay:
+                    time.sleep(frame_delay - elapsed)
+                last_time = time.time()
+
             ret, frame = self.cap.read()
             if not ret:
-                self.logger.error("Kare okunamadı, bağlantı kopmuş olabilir.")
+                if self._is_file:
+                    self.logger.info("Video dosyası sonuna gelindi.")
+                else:
+                    self.logger.error("Kare okunamadı, bağlantı kopmuş olabilir.")
+                
+                # Akış bitti ama hemen running=False yapma ki tüketici son kareleri alabilsin
                 self.connected = False
                 break
 
@@ -101,19 +133,12 @@ class Streamer:
 
     def stop(self):
         self.running = False
-        self.join(timeout=2)
 
     def _clean_up(self):
         if self.cap:
             self.cap.release()
         self.connected = False
-
-        # Kuyruğu temizle
-        while not self.frame_queue.empty():
-            try:
-                self.frame_queue.get_nowait()
-            except Empty:
-                break
+        self.running = False
 
     def get_stats(self):
         uptime = (
