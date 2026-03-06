@@ -1,0 +1,5 @@
+{
+    "model_path": "models/OPear",
+    "sequence_length": 16,
+    "stride": 1
+}

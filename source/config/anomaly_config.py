@@ -6,6 +6,6 @@ class AnomalyConfig(ABC):
     model_path: str
 
 @dataclass
-class LSTMAnomalyConfig(AnomalyConfig):
-    sequence_length: int = 10
+class VideoMAEAnomalyConfig(AnomalyConfig):
+    sequence_length: int = 16
     stride: int = 1
