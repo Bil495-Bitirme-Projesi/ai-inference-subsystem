@@ -1,4 +1,5 @@
-from .interfaces import IDispatcher
+from engine.interfaces import IDispatcher
+
 
 class ResultDispatcher(IDispatcher):
     def dispatch(self, detections, info, frame):

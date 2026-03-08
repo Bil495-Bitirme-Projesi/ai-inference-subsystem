@@ -49,7 +49,7 @@ class Streamer(Thread):
             else:
                 retry_count += 1
                 self.logger.warning(
-                    f"Bağlantı denemesi {retry_count}/{self.max_retries}"
+                    f"Trying to connect to {self.url}, retry {retry_count}/{self.max_retries}"
                 )
                 time.sleep(2)
 
@@ -66,14 +66,16 @@ class Streamer(Thread):
             return False
 
         self.connected = True
-        self.logger.info(f"Bağlantı başarılı: {self.url}")
-        
+        self.logger.info(f"Connection successful: {self.url}")
+
         # Dosya olup olmadığını kontrol et
-        self._is_file = not (str(self.url).startswith("rtsp://") or str(self.url).startswith("http://"))
+        self._is_file = not (
+            str(self.url).startswith("rtsp://") or str(self.url).startswith("http://")
+        )
         self._fps = self.cap.get(cv2.CAP_PROP_FPS)
         if self._fps <= 0:
-            self._fps = 30.0 # Default
-            
+            self._fps = 30.0  # Default
+
         return True
 
     def is_connected(self) -> bool:
@@ -99,10 +101,10 @@ class Streamer(Thread):
             ret, frame = self.cap.read()
             if not ret:
                 if self._is_file:
-                    self.logger.info("Video dosyası sonuna gelindi.")
+                    self.logger.info("Video file ends.")
                 else:
-                    self.logger.error("Kare okunamadı, bağlantı kopmuş olabilir.")
-                
+                    self.logger.error("Frame not read, connection might be lost.")
+
                 # Akış bitti ama hemen running=False yapma ki tüketici son kareleri alabilsin
                 self.connected = False
                 break
@@ -114,10 +116,10 @@ class Streamer(Thread):
                 try:
                     self.frame_callback(frame)
                 except Exception as e:
-                    self.logger.error(f"Callback hatası: {e}")
+                    self.logger.error(f"Callback error: {e}")
 
     def _frame_to_queue(self, frame):
-        """Kuyruk doluysa en eski kareyi atıp yenisini ekler (Real-time önceliği)."""
+        """if queue is full, drop the oldest frame"""
         try:
             if self.frame_queue.full():
                 self.frame_queue.get_nowait()  # Eski kareyi çıkar

@@ -1,9 +1,11 @@
 from abc import ABC
 from dataclasses import dataclass
 
+
 @dataclass
 class AnomalyConfig(ABC):
     model_path: str
+
 
 @dataclass
 class VideoMAEAnomalyConfig(AnomalyConfig):

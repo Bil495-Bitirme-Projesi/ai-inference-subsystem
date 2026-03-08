@@ -1,9 +1,8 @@
-from engine.videomae_engine import VideoMAEAnomalyEngine
+from typing import Dict, Type, Callable, Any
+
 from config.config_manager import ConfigManager
-from config.anomaly_config import VideoMAEAnomalyConfig
 from engine.interfaces import IInferenceEngine
 
-from typing import Dict, Type, Callable, Any
 
 class InferenceFactory:
     # Hem sınıfı hem de config tipini saklayan bir yapı
@@ -14,9 +13,10 @@ class InferenceFactory:
         def wrapper(engine_cls: Type):
             cls._registry[model_type] = {
                 "engine": engine_cls,
-                "config_schema": config_class
+                "config_schema": config_class,
             }
             return engine_cls
+
         return wrapper
 
     @classmethod
@@ -28,8 +28,10 @@ class InferenceFactory:
         config = ConfigManager.load(config_path, entry["config_schema"])
         return entry["engine"](config)
 
+
 def register_inference_engine(model_type: str):
     def decorator(creator_fn: Callable):
         InferenceFactory.register(model_type, creator_fn)
         return creator_fn
+
     return decorator
