@@ -61,8 +61,8 @@ class VideoMAEAnomalyEngine(IInferenceEngine):
 
             output = {
                 "predicted_label": reverse_mapping[predicted_label],
-                "probs": probs[predicted_label].item(),
-                "elapsed_video": elapsed_video,
+                "probs": f"{probs[predicted_label].item():.2f}",
+                "elapsed_video": f"{elapsed_video:.2f}",
             }
 
             print(f"[LOG] VideoMAE: \n{output}")

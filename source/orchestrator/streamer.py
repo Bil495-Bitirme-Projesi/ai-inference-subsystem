@@ -89,6 +89,7 @@ class Streamer(Thread):
         """Görüntü yakalama döngüsü."""
         last_time = time.time()
         frame_delay = 1.0 / self._fps if self._fps > 0 else 0.033
+        frame_idx = 0
 
         while self.running and self.connected:
             if self._is_file:
@@ -105,12 +106,13 @@ class Streamer(Thread):
                 else:
                     self.logger.error("Frame not read, connection might be lost.")
 
-                # Akış bitti ama hemen running=False yapma ki tüketici son kareleri alabilsin
                 self.connected = False
                 break
 
-            self._frame_to_queue(frame)
+            # (İndeks, Kare) şeklinde kuyruğa ekle
+            self._frame_to_queue((frame_idx, frame))
             self.stats["frames_received"] += 1
+            frame_idx += 1
 
             if self.frame_callback:
                 try:
@@ -118,16 +120,16 @@ class Streamer(Thread):
                 except Exception as e:
                     self.logger.error(f"Callback error: {e}")
 
-    def _frame_to_queue(self, frame):
+    def _frame_to_queue(self, data):
         """if queue is full, drop the oldest frame"""
         try:
             if self.frame_queue.full():
-                self.frame_queue.get_nowait()  # Eski kareyi çıkar
-            self.frame_queue.put_nowait(frame)
+                self.frame_queue.get_nowait()
+            self.frame_queue.put_nowait(data)
         except (Empty, Full):
             pass
 
-    def read_frame(self) -> Optional[np.ndarray]:
+    def read_frame(self) -> Optional[tuple[int, np.ndarray]]:
         try:
             return self.frame_queue.get(timeout=1.0)
         except Empty:

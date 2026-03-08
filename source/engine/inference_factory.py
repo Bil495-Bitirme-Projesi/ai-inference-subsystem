@@ -29,9 +29,9 @@ class InferenceFactory:
         return entry["engine"](config)
 
 
-def register_inference_engine(model_type: str):
-    def decorator(creator_fn: Callable):
-        InferenceFactory.register(model_type, creator_fn)
-        return creator_fn
-
-    return decorator
+def register_inference_engine(model_type: str, config_class: Type):
+    """
+    Sınıf bazlı kayıt için yardımcı decorator.
+    Kullanım: @register_inference_engine("ModelName", ConfigClass)
+    """
+    return InferenceFactory.register(model_type, config_class)
