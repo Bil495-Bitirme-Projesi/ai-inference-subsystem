@@ -21,7 +21,7 @@ This repository contains the AI inference subsystem for the **Video Anomaly Dete
 1. **Clone the repository:**
    ```bash
    git clone <repository-url>
-   cd vad-python
+   cd ai-inference-subsystem
    ```
 
 2. **Sync dependencies:**
