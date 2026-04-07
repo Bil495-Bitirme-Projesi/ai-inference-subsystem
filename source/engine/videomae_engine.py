@@ -2,9 +2,9 @@ import torch
 import time
 from transformers import VideoMAEForVideoClassification
 
-from config.anomaly_config import VideoMAEAnomalyConfig
-from engine.interfaces import IInferenceEngine
-from engine.inference_factory import register_inference_engine
+from source.config.anomaly_config import VideoMAEAnomalyConfig
+from source.engine.interfaces import IInferenceEngine
+from source.engine.inference_factory import register_inference_engine
 
 class_mapping = {
     "Abuse": 0,

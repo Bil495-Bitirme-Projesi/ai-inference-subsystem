@@ -1,7 +1,7 @@
 from typing import Dict, Type, Callable, Any
 
-from config.config_manager import ConfigManager
-from engine.interfaces import IInferenceEngine
+from source.config.config_manager import ConfigManager
+from source.engine.interfaces import IInferenceEngine
 
 
 class InferenceFactory:

@@ -1,114 +1,124 @@
-import argparse
-import time
-import os
+"""
+AIS (AI Inference Subsystem) — Ana başlatma dosyası.
+
+Tüm bileşenleri doğru sırayla oluşturur, CMS ile bağlantı kurar
+ve kamera konfigürasyonunu WebSocket üzerinden dinlemeye başlar.
+
+Başlatma akışı:
+    1. AI Engine yüklenir (VideoMAE) ve InferenceService ile sarmalanır
+    2. CMS'e login olunur (JWT token alınır)
+    3. WebSocket bağlantısı kurulur
+    4. CMS'den SNAPSHOT ile kamera listesi alınır
+    5. Her kamera için StreamIngestor başlatılır
+    6. Anomali tespitinde → klip kayıt → CMS ingest → MinIO upload
+
+Kullanım:
+    uv run main.py
+"""
+
 import sys
+import signal
+import logging
+import threading
 
-# Proje kök dizinini ve 'source' dizinini path'e ekleyelim
-root_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(root_dir)
-sys.path.append(os.path.join(root_dir, "source"))
+from dotenv import load_dotenv
 
-# Engine'lerin register olması için import edilmesi gerekir
-try:
-    from engine.videomae_engine import VideoMAEAnomalyEngine
-except ImportError as e:
-    print(f"[WARNING] VideoMAE engine could not be imported: {e}")
+# .env dosyasını yükle
+load_dotenv()
 
-from orchestrator.stream_ingestor import StreamIngestor
-from proc.preproc import Preprocessor
-from proc.sequence_buf import SequenceBuffer
-from engine.inference_factory import InferenceFactory
-from dispatch.result_dispatcher import ResultDispatcher
+from source.comm.api_client import CMSApiClient
+from source.comm.ws_client import CMSWebSocketClient
+from source.orchestrator.ingestor_manager import IngestorManager
+from source.dispatch.result_dispatcher import ResultDispatcher
+from source.proc.preproc import Preprocessor
+from source.engine.inference_factory import InferenceFactory
+from source.engine.inference_service import InferenceService
+from source.recording import ClipUploader
+
+# VideoMAE engine'i factory'ye kaydetmek için import et
+# (@register_inference_engine decorator'ı import sırasında çalışır)
+import source.engine.videomae_engine  # noqa: F401
+
+
+def setup_logging():
+    """Logging konfigürasyonu."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
 
 def main():
-    parser = argparse.ArgumentParser(description="AI Inference Subsystem")
-    parser.add_argument("--url", type=str, default="sample_data/Assault001_x264.mp4", 
-                        help="Path to video file or RTSP stream URL")
-    parser.add_argument("--config", type=str, default="config/videomae_cfg.json", 
-                        help="Path to inference configuration JSON")
-    parser.add_argument("--model", type=str, default="VideoMAE", 
-                        help="Model type to use (default: VideoMAE)")
-    parser.add_argument("--window", type=int, default=16, 
-                        help="Sequence window length (default: 16)")
-    parser.add_argument("--stride", type=int, default=16, 
-                        help="Inference stride (default: 16, means non-overlapping)")
-    parser.add_argument("--buffer", type=int, default=32, 
-                        help="Streamer buffer size")
-    args = parser.parse_args()
+    setup_logging()
+    logger = logging.getLogger("AIS")
+    logger.info("=" * 50)
+    logger.info("AI Inference Subsystem starting...")
+    logger.info("=" * 50)
 
-    # Config kontrolü
-    if not os.path.exists(args.config):
-        print(f"[ERROR] Configuration file not found: {args.config}")
-        return
+    # AI Engine — model bir kez yüklenir, tüm kameralar paylaşır
+    logger.info("Loading AI inference engine...")
+    raw_engine = InferenceFactory.create("VideoMAE", "config/videomae_cfg.json")
+    engine = InferenceService(raw_engine)
+    logger.info(f"Engine ready on device: {engine.device}")
 
-    print("="*50)
-    print("   AI INFERENCE SUBSYSTEM   ")
-    print("="*50)
-    print(f"[*] Stream Source : {args.url}")
-    print(f"[*] Model Type    : {args.model}")
-    print(f"[*] Config Path   : {args.config}")
-    print(f"[*] Window/Stride : {args.window} / {args.stride}")
-    
-    # 1. Bileşenlerin Başlatılması
-    print("[*] Initializing components...")
     preprocessor = Preprocessor()
-    
-    # Pencere uzunluğu ve atlama (stride) değerlerini ayarla
-    seq_buffer = SequenceBuffer(sequence_length=args.window, stride=args.stride)
-    
-    print("[*] Loading inference engine (this may take a while)...")
-    try:
-        engine = InferenceFactory.create(args.model, args.config)
-    except Exception as e:
-        print(f"[ERROR] Failed to create inference engine: {e}")
-        return
-    
-    dispatcher = ResultDispatcher()
-    
-    # 2. Ingestor Oluşturulması
-    ingestor = StreamIngestor(
-        url=args.url,
+
+    #CMS API Client — login
+    api_client = CMSApiClient()
+    if not api_client.login():
+        logger.critical("CMS login failed! Check CMS_REST_URL, SUBSYSTEM_ID, SUBSYSTEM_SECRET.")
+        sys.exit(1)
+
+    # CMS ingest + MinIO clip upload
+    clip_uploader = ClipUploader()
+    dispatcher = ResultDispatcher(api_client=api_client, clip_uploader=clip_uploader)
+
+    # kamera yaşam döngüsü yönetimi
+    manager = IngestorManager(
         preprocessor=preprocessor,
-        seq_buffer=seq_buffer,
         engine=engine,
         dispatcher=dispatcher,
-        buffer_size=args.buffer
+        sequence_length=16,
+        stride=1,
     )
-    
-    # 3. Yakalama Başlatılması
-    print("[*] Starting capture thread...")
-    ingestor.start_capture()
-    
-    # 4. Ana Döngü - İstatistikleri İzle
+
+    # WebSocket Client — CMS ile konfigürasyon senkronizasyonu
+    ws_client = CMSWebSocketClient(
+        api_client=api_client,
+        on_snapshot=manager.sync_from_snapshot,
+        on_camera_delta=manager.handle_camera_delta,
+    )
+
+    # WS client'ı manager'a bağla (kamera ONLINE/OFFLINE + heartbeat için)
+    manager.ws_client = ws_client
+
+    # WebSocket bağlantısını başlat (arka plan thread'i)
+    ws_client.connect()
+
+    logger.info("AIS is running. Waiting for camera configuration from CMS...")
+
+    # Graceful shutdown
+    shutdown_event = threading.Event()
+
+    def signal_handler(signum, frame):
+        logger.info(f"Shutdown signal received (signal={signum}). Stopping...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Ana thread'i canlı tut — shutdown sinyali bekle
     try:
-        print("[*] System is running. Press Ctrl+C to stop.")
-        while ingestor.is_alive():
-            stats = ingestor.get_stats()
-            if stats['connected']:
-                status = "CONNECTED"
-                # FPS bilgisi 0 gelirse (henüz kare okunmadıysa) bekle
-                fps_info = f"FPS: {stats['fps']:.2f}" if stats['fps'] > 0 else "FPS: --"
-                print(f"\r[{status}] {fps_info} | Total Frames: {stats['frames']}   ", end="")
-            else:
-                if stats['frames'] > 0:
-                   print(f"\r[DRAINING] Stream ended. Processing remaining frames... ({stats['frames']})   ", end="")
-                else:
-                   # Henüz bağlanamadıysa veya kapandıysa
-                   print(f"\r[WAITING] Connecting to stream...   ", end="")
-            
-            time.sleep(1)
-            
-            # Eğer streamer kapandıysa ve ingestor hala alive ise kuyruk bitince çıkacak zaten
-            # Ama manuel bir kontrol gerekirse buraya eklenebilir
-            
+        shutdown_event.wait()
     except KeyboardInterrupt:
-        print("\n\n[!] Stopping system...")
+        pass
     finally:
-        ingestor.stop_capture()
-        # İpliklerin düzgünce kapanması için kısa bir bekleme
-        time.sleep(0.5)
-        print("\n[+] System shutdown complete.")
-        print("="*50)
+        logger.info("Shutting down AIS...")
+        manager.stop_all()
+        ws_client.stop()
+        logger.info("AIS stopped. Goodbye.")
+
 
 if __name__ == "__main__":
     main()

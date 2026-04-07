@@ -1,5 +1,5 @@
 import json
-from config.anomaly_config import AnomalyConfig
+from source.config.anomaly_config import AnomalyConfig
 
 
 class ConfigManager:
