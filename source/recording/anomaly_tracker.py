@@ -38,6 +38,7 @@ class EventClipRequest:
     """
     event_type: str           # En sık tespit edilen anomali tipi
     max_score: float          # Olay boyunca görülen en yüksek skor
+    description: str          # En yüksek skorlu tespite ait açıklama
     start_frame: int          # Anomalinin başladığı kare
     end_frame: int            # Post-event dahil bitiş karesi
     pre_event_frames: int     # Klibe dahil edilecek ön-olay kare sayısı
@@ -94,6 +95,7 @@ class AnomalyTracker:
         self._event_start_frame: Optional[int] = None
         self._last_anomaly_frame: Optional[int] = None
         self._max_score: float = 0.0
+        self._description: str = ""
         self._type_counts: Dict[str, int] = {}
         self._detection_count: int = 0
         self._event_timestamp: Optional[str] = None
@@ -118,14 +120,15 @@ class AnomalyTracker:
         """
         label = prediction.get("predicted_label", self.normal_label)
         score = float(prediction.get("probs", 0))
+        description = prediction.get("description", "")
         is_anomaly = label != self.normal_label
 
         if self.state == self.IDLE:
-            return self._handle_idle(is_anomaly, label, score, frame_id)
+            return self._handle_idle(is_anomaly, label, score, description, frame_id)
         elif self.state == self.ACTIVE:
-            return self._handle_active(is_anomaly, label, score, frame_id)
+            return self._handle_active(is_anomaly, label, score, description, frame_id)
         elif self.state == self.POST_WAIT:
-            return self._handle_post_wait(is_anomaly, label, score, frame_id)
+            return self._handle_post_wait(is_anomaly, label, score, description, frame_id)
 
         return None
 
@@ -144,7 +147,7 @@ class AnomalyTracker:
     #  State handlers
     # ------------------------------------------------------------------ #
 
-    def _handle_idle(self, is_anomaly, label, score, frame_id):
+    def _handle_idle(self, is_anomaly, label, score, description, frame_id):
         """IDLE durumunda: yeni anomali bekler. Sadece score >= threshold ise olay başlar."""
         if is_anomaly and score >= self.threshold and self._cooldown_ok(frame_id):
             # Yeni olay başladı
@@ -152,6 +155,7 @@ class AnomalyTracker:
             self._event_start_frame = frame_id
             self._last_anomaly_frame = frame_id
             self._max_score = score
+            self._description = description
             self._type_counts = {label: 1}
             self._detection_count = 1
             self._event_timestamp = datetime.now(timezone.utc).isoformat()
@@ -161,12 +165,14 @@ class AnomalyTracker:
             )
         return None
 
-    def _handle_active(self, is_anomaly, label, score, frame_id):
+    def _handle_active(self, is_anomaly, label, score, description, frame_id):
         """ACTIVE durumunda: anomali devam ediyor veya durdu."""
         if is_anomaly:
             # Olay devam ediyor — istatistikleri güncelle
             self._last_anomaly_frame = frame_id
-            self._max_score = max(self._max_score, score)
+            if score > self._max_score:
+                self._max_score = score
+                self._description = description
             self._type_counts[label] = self._type_counts.get(label, 0) + 1
             self._detection_count += 1
         else:
@@ -178,13 +184,15 @@ class AnomalyTracker:
             )
         return None
 
-    def _handle_post_wait(self, is_anomaly, label, score, frame_id):
+    def _handle_post_wait(self, is_anomaly, label, score, description, frame_id):
         """POST_WAIT durumunda: post-event süresi doluyor veya anomali geri dönüyor."""
         if is_anomaly:
             # Anomali geri döndü — aynı olay devam ediyor
             self.state = self.ACTIVE
             self._last_anomaly_frame = frame_id
-            self._max_score = max(self._max_score, score)
+            if score > self._max_score:
+                self._max_score = score
+                self._description = description
             self._type_counts[label] = self._type_counts.get(label, 0) + 1
             self._detection_count += 1
             self.logger.debug(
@@ -214,6 +222,7 @@ class AnomalyTracker:
         request = EventClipRequest(
             event_type=dominant_type,
             max_score=self._max_score,
+            description=self._description,
             start_frame=self._event_start_frame,
             end_frame=current_frame,
             pre_event_frames=self.pre_event_frames,
@@ -246,6 +255,7 @@ class AnomalyTracker:
         self._event_start_frame = None
         self._last_anomaly_frame = None
         self._max_score = 0.0
+        self._description = ""
         self._type_counts = {}
         self._detection_count = 0
         self._event_timestamp = None

@@ -55,6 +55,7 @@ class ResultDispatcher(IDispatcher):
             "timestamp": clip_request.timestamp,
             "score": round(clip_request.max_score, 4),
             "type": clip_request.event_type,
+            "description": clip_request.description,
         }
 
         return self._ingest_and_upload(event_payload, clip_path)
@@ -82,6 +83,7 @@ class ResultDispatcher(IDispatcher):
             "timestamp": clip_request.timestamp,
             "score": round(clip_request.max_score, 4),
             "type": clip_request.event_type,
+            "description": clip_request.description,
         }
 
         return self._ingest_and_upload(event_payload, clip_path)
