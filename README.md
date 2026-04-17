@@ -75,7 +75,8 @@ uv run main.py
 The project includes a suite of tests to verify the inference engine and data ingestion:
 
 ```bash
-uv run python -m unittest discover tests
+uv run -m pytest tests/test_unit.py -v --tb=short
+uv run -m pytest tests/test_integration.py -v --tb=short
 ```
 
 ---
