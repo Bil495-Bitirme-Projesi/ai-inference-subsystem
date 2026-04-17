@@ -71,71 +71,99 @@ class StreamIngestor(Thread):
 
     def _process_loop(self):
         fps = self.streamer.fps if self.streamer.fps > 0 else 30.0
+        frame_count = 0
+
+        self.logger.info(f"Processing loop started for camera {self.cameraId} (fps={fps})")
 
         while self.streamer.running or not self.streamer.frame_queue.empty():
-            data = self.streamer.read_frame()
-            if data is None:
-                # Gecikmeli bağlantı veya bitiş kontrolü
-                if not self.streamer.running:
-                    break
-                continue
+            try:
+                data = self.streamer.read_frame()
+                if data is None:
+                    # Gecikmeli bağlantı veya bitiş kontrolü
+                    if not self.streamer.running:
+                        break
+                    continue
 
-            frame_id, raw_frame = data
+                frame_id, raw_frame = data
+                frame_count += 1
 
-            # 1) Ham kareyi RecordBuffer'a ekle (pre-event ring buffer)
-            self.record_buffer.add_frame(frame_id, raw_frame)
+                if frame_count == 1:
+                    self.logger.info(
+                        f"Camera {self.cameraId}: First frame received "
+                        f"(shape={raw_frame.shape}, dtype={raw_frame.dtype})"
+                    )
 
-            # 2) Anomali kaydı aktifse, kareyi canlı diske yaz
-            if self.live_recorder.is_recording:
-                self.live_recorder.add_frame(frame_id, raw_frame)
+                # 1) Ham kareyi RecordBuffer'a ekle (pre-event ring buffer)
+                self.record_buffer.add_frame(frame_id, raw_frame)
 
-            # 3) İşlenmiş kareyi SequenceBuffer'a ekle (inference için)
-            processed = self.preprocessor.process(raw_frame)
-            self.sequence_buffer.add_frame(frame_id, processed)
+                # 2) Anomali kaydı aktifse, kareyi canlı diske yaz
+                if self.live_recorder.is_recording:
+                    self.live_recorder.add_frame(frame_id, raw_frame)
 
-            if self.sequence_buffer.is_ready():
-                seq_data = self.sequence_buffer.get_sequence()
+                # 3) İşlenmiş kareyi SequenceBuffer'a ekle (inference için)
+                processed = self.preprocessor.process(raw_frame)
+                self.sequence_buffer.add_frame(frame_id, processed)
 
-                # İndeksleri ve kareleri ayır
-                indices = [item[0] for item in seq_data]
-                frames = [item[1] for item in seq_data]
+                if self.sequence_buffer.is_ready():
+                    seq_data = self.sequence_buffer.get_sequence()
 
-                # Zaman aralığını hesapla
-                start_sec = indices[0] / fps
-                end_sec = indices[-1] / fps
+                    # İndeksleri ve kareleri ayır
+                    indices = [item[0] for item in seq_data]
+                    frames = [item[1] for item in seq_data]
 
-                # List[np.ndarray] -> torch.Tensor (T, H, W, C)
-                seq_tensor = torch.stack([torch.from_numpy(f) for f in frames])
-                # (T, H, W, C) -> (T, C, H, W) -> (B, T, C, H, W)
-                seq_tensor = seq_tensor.permute(0, 3, 1, 2).unsqueeze(0)
+                    # Zaman aralığını hesapla
+                    start_sec = indices[0] / fps
+                    end_sec = indices[-1] / fps
 
-                # Inference (InferenceService üzerinden thread-safe)
-                results = self.inference_engine.predict(seq_tensor)
+                    self.logger.debug(
+                        f"Camera {self.cameraId}: Sequence ready "
+                        f"[{start_sec:.1f}s - {end_sec:.1f}s], running inference..."
+                    )
 
-                meta_info = {
-                    "start_sec": round(start_sec, 2),
-                    "end_sec": round(end_sec, 2),
-                    "start_frame": indices[0],
-                    "end_frame": indices[-1],
-                    "cameraId": self.cameraId,
-                }
+                    # List[np.ndarray] -> torch.Tensor (T, H, W, C)
+                    seq_tensor = torch.stack([torch.from_numpy(f) for f in frames])
+                    # (T, H, W, C) -> (T, C, H, W) -> (B, T, C, H, W)
+                    seq_tensor = seq_tensor.permute(0, 3, 1, 2).unsqueeze(0)
 
-                self.dispatcher.dispatch(results, meta_info, raw_frame)
+                    # Inference (InferenceService üzerinden thread-safe)
+                    results = self.inference_engine.predict(seq_tensor)
 
-                # Anomali state machine'i güncelle
-                prev_state = self.anomaly_tracker.state
-                clip_request = self.anomaly_tracker.update(results, frame_id)
+                    meta_info = {
+                        "start_sec": round(start_sec, 2),
+                        "end_sec": round(end_sec, 2),
+                        "start_frame": indices[0],
+                        "end_frame": indices[-1],
+                        "cameraId": self.cameraId,
+                    }
 
-                # IDLE → ACTIVE geçişi: canlı kayda başla
-                if (
-                    prev_state == AnomalyTracker.IDLE
-                    and self.anomaly_tracker.state == AnomalyTracker.ACTIVE
-                ):
-                    self._start_live_recording(frame_id, fps)
+                    self.dispatcher.dispatch(results, meta_info, raw_frame)
 
-                # Olay tamamlandı: kaydı bitir
-                if clip_request:
-                    self._handle_completed_event(clip_request)
+                    # Anomali state machine'i güncelle
+                    prev_state = self.anomaly_tracker.state
+                    clip_request = self.anomaly_tracker.update(results, frame_id)
+
+                    # IDLE → ACTIVE geçişi: canlı kayda başla
+                    if (
+                        prev_state == AnomalyTracker.IDLE
+                        and self.anomaly_tracker.state == AnomalyTracker.ACTIVE
+                    ):
+                        self._start_live_recording(frame_id, fps)
+
+                    # Olay tamamlandı: kaydı bitir
+                    if clip_request:
+                        self._handle_completed_event(clip_request)
+
+            except Exception as e:
+                self.logger.error(
+                    f"Camera {self.cameraId}: Error in processing loop "
+                    f"(frame_count={frame_count}): {e}",
+                    exc_info=True,
+                )
+
+        self.logger.info(
+            f"Camera {self.cameraId}: Processing loop ended "
+            f"(total frames processed: {frame_count})"
+        )
 
     # ------------------------------------------------------------------ #
     #  Kayıt yönetimi

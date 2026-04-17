@@ -41,7 +41,7 @@ class IngestorManager:
     def sync_from_snapshot(self, snapshot_data: dict):
         """
         SNAPSHOT mesajı geldiğinde tüm kameraları senkronize eder.
-        snapshot_data: {"type": "SNAPSHOT", "cameras": [...]}
+        snapshot_data: {"type": "CONFIG_SNAPSHOT", "cameras": [...]}
         """
         cameras_list = snapshot_data.get("cameras", [])
         active_ids = {cam["cameraId"] for cam in cameras_list if cam.get("detectionEnabled")}

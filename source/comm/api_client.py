@@ -14,7 +14,13 @@ class CMSApiClient:
         self.subsystem_secret = os.getenv("SUBSYSTEM_SECRET")
         self.token = None
         self.logger = logging.getLogger("CMSApiClient")
+
+        # SSL sertifika yolu (self-signed cert için)
+        cert_path = os.getenv("SSL_CERT_PATH")
+        self._verify = cert_path if cert_path else True
+
         self.session = requests.Session()
+        self.session.verify = self._verify
 
     def login(self, force: bool = False) -> bool:
         """
@@ -27,7 +33,7 @@ class CMSApiClient:
         url = f"{self.base_url}/api/auth/subsystem-login"
         payload = {"subsystemId": self.subsystem_id, "subsystemSecret": self.subsystem_secret}
         try:
-            response = requests.post(url, json=payload, timeout=10)
+            response = requests.post(url, json=payload, timeout=10, verify=self._verify)
             if response.status_code == 200:
                 self.token = response.json().get("token")
                 self.session.headers.update({"Authorization": f"Bearer {self.token}"})

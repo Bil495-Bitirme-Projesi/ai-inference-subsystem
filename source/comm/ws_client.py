@@ -1,5 +1,6 @@
 import websocket
 import json
+import ssl
 import threading
 import time
 import os
@@ -25,6 +26,15 @@ class CMSWebSocketClient:
         self.ws = None
         self.logger = logging.getLogger("CMSWebSocketClient")
         self.should_reconnect = True
+
+        # SSL context (self-signed cert desteği)
+        cert_path = os.getenv("SSL_CERT_PATH")
+        self._sslopt = {}
+        if cert_path:
+            self._sslopt = {
+                "cert_reqs": ssl.CERT_NONE,
+                "ca_certs": cert_path,
+            }
 
         # Exponential backoff parametreleri
         self._reconnect_delay = 1       # Başlangıç bekleme süresi (saniye)
@@ -74,7 +84,7 @@ class CMSWebSocketClient:
                 )
 
                 # run_forever bağlantı kesilene kadar thread'i bloklar
-                self.ws.run_forever()
+                self.ws.run_forever(sslopt=self._sslopt)
 
             except Exception as e:
                 self.logger.error(f"WebSocket connection loop error: {e}")
@@ -118,14 +128,14 @@ class CMSWebSocketClient:
 
             self.logger.debug(f"Received message type: {msg_type}")
 
-            if msg_type == "SNAPSHOT":
+            if msg_type == "CONFIG_SNAPSHOT":
                 self.logger.info("Config snapshot received from CMS.")
                 self.on_snapshot(data)
             elif msg_type == "CAMERA_DELTA":
                 self.logger.info(f"Camera delta received: {data.get('changeType')}")
                 self.on_camera_delta(data)
             else:
-                self.logger.warning(f"Unrecognized message type received: {msg_type}")
+                self.logger.warning(f"Unrecognized message received: {data}")
 
         except json.JSONDecodeError:
             self.logger.error("Received an invalid JSON message from WebSocket.")

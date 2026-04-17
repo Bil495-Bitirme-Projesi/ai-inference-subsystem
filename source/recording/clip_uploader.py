@@ -36,10 +36,10 @@ class ClipUploader:
             timeout:   Upload isteği zaman aşımı (saniye).
             cert_path: Self-signed sertifika dosya yolu (deploy stack için).
                        Örn: "nginx/certs/server.crt"
-                       None ise varsayılan SSL doğrulama kullanılır.
+                       None ise SSL_CERT_PATH env değişkenine bakılır.
         """
         self.timeout = timeout
-        self.cert_path = cert_path
+        self.cert_path = cert_path or os.getenv("SSL_CERT_PATH")
         self.logger = logging.getLogger("ClipUploader")
 
     # ------------------------------------------------------------------ #
