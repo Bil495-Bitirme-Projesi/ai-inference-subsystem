@@ -35,3 +35,9 @@ def register_inference_engine(model_type: str, config_class: Type):
     Kullanım: @register_inference_engine("ModelName", ConfigClass)
     """
     return InferenceFactory.register(model_type, config_class)
+
+
+# Import all engine implementations to trigger their @register_inference_engine decorators
+# Must be at the end to avoid circular imports
+from source.engine import videomae_engine
+from source.engine import vlm_engine

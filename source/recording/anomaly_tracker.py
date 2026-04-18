@@ -64,12 +64,13 @@ class AnomalyTracker:
 
     def __init__(
         self,
-        normal_label: str = "Normal Videos",
+        normal_label: str = "Normal",
         threshold: float = 0.0,
         pre_event_seconds: float = 5.0,
         post_event_seconds: float = 5.0,
         cooldown_seconds: float = 10.0,
         fps: float = 30.0,
+        smoothing_alpha: float = 0.4,
     ):
         """
         Args:
@@ -87,6 +88,13 @@ class AnomalyTracker:
         self.pre_event_frames = int(pre_event_seconds * fps)
         self.post_event_frames = int(post_event_seconds * fps)
         self.cooldown_frames = int(cooldown_seconds * fps)
+
+        # Exponential moving average for smoothing anomaly scores (to avoid jitter)
+        # ema_{t} = alpha * raw_score_t + (1-alpha) * ema_{t-1}
+        # raw_score_t is score when label != normal_label, otherwise 0.0
+        self.smoothing_alpha = float(smoothing_alpha)
+        self._ema_score: float = 0.0
+        self._last_non_normal_label: Optional[str] = None
 
         self.state: str = self.IDLE
         self.logger = logging.getLogger("AnomalyTracker")
@@ -119,9 +127,26 @@ class AnomalyTracker:
             Olay tamamlandıysa EventClipRequest, devam ediyorsa/yoksa None.
         """
         label = prediction.get("predicted_label", self.normal_label)
-        score = float(prediction.get("probs", 0))
+        # support both numeric and string probability formats
+        try:
+            score = float(prediction.get("probs", 0))
+        except Exception:
+            score = 0.0
         description = prediction.get("description", "")
-        is_anomaly = label != self.normal_label
+
+        # raw indicator: current frame's raw anomaly score (0.0 if label == normal)
+        raw_score = score if label != self.normal_label else 0.0
+
+        # update last seen non-normal label to use when EMA triggers anomaly
+        if label != self.normal_label:
+            self._last_non_normal_label = label
+
+        # update EMA of anomaly score
+        alpha = max(0.0, min(1.0, self.smoothing_alpha))
+        self._ema_score = alpha * raw_score + (1.0 - alpha) * self._ema_score
+
+        # smoothed anomaly decision
+        is_anomaly = self._ema_score >= self.threshold
 
         if self.state == self.IDLE:
             return self._handle_idle(is_anomaly, label, score, description, frame_id)
@@ -148,38 +173,43 @@ class AnomalyTracker:
     # ------------------------------------------------------------------ #
 
     def _handle_idle(self, is_anomaly, label, score, description, frame_id):
-        """IDLE durumunda: yeni anomali bekler. Sadece score >= threshold ise olay başlar."""
-        if is_anomaly and score >= self.threshold and self._cooldown_ok(frame_id):
+        """IDLE durumunda: yeni anomali bekler. EMA tabanlı karar verilir ve cooldown kontrolü yapılır."""
+        # Use the smoothed EMA decision. If EMA indicates anomaly, pick a label
+        # from the latest non-normal observation (if available).
+        if is_anomaly and self._cooldown_ok(frame_id):
+            chosen_label = self._last_non_normal_label or label
             # Yeni olay başladı
             self.state = self.ACTIVE
             self._event_start_frame = frame_id
             self._last_anomaly_frame = frame_id
             self._max_score = score
             self._description = description
-            self._type_counts = {label: 1}
+            self._type_counts = {chosen_label: 1}
             self._detection_count = 1
             self._event_timestamp = datetime.now(timezone.utc).isoformat()
             self.logger.info(
-                f"Anomaly event STARTED: {label} "
-                f"(score={score:.2f}, threshold={self.threshold}) at frame {frame_id}"
+                f"Anomaly event STARTED: {chosen_label} "
+                f"(ema_score={self._ema_score:.3f}, threshold={self.threshold}) at frame {frame_id}"
             )
         return None
 
     def _handle_active(self, is_anomaly, label, score, description, frame_id):
-        """ACTIVE durumunda: anomali devam ediyor veya durdu."""
+        """ACTIVE durumunda: anomali devam ediyor veya durdu (EMA bazlı)."""
         if is_anomaly:
             # Olay devam ediyor — istatistikleri güncelle
             self._last_anomaly_frame = frame_id
             if score > self._max_score:
                 self._max_score = score
                 self._description = description
-            self._type_counts[label] = self._type_counts.get(label, 0) + 1
+            # Update counts using raw label if available, otherwise use last_non_normal
+            used_label = label if label != self.normal_label else (self._last_non_normal_label or label)
+            self._type_counts[used_label] = self._type_counts.get(used_label, 0) + 1
             self._detection_count += 1
         else:
-            # Normal tespit geldi — post-event beklemeye geç
+            # EMA indicates anomaly has stopped — enter post-event wait
             self.state = self.POST_WAIT
             self.logger.debug(
-                f"Anomaly signal stopped at frame {frame_id}, "
+                f"Anomaly signal stopped (EMA) at frame {frame_id}, "
                 f"entering post-event wait ({self.post_event_frames} frames)."
             )
         return None
@@ -193,15 +223,16 @@ class AnomalyTracker:
             if score > self._max_score:
                 self._max_score = score
                 self._description = description
-            self._type_counts[label] = self._type_counts.get(label, 0) + 1
+            used_label = label if label != self.normal_label else (self._last_non_normal_label or label)
+            self._type_counts[used_label] = self._type_counts.get(used_label, 0) + 1
             self._detection_count += 1
             self.logger.debug(
                 f"Anomaly resumed at frame {frame_id}, back to ACTIVE."
             )
             return None
 
-        # Post-event süresi doldu mu kontrol et
-        frames_since_last_anomaly = frame_id - self._last_anomaly_frame
+        # Post-event süresi doldu mu kontrol et (use last anomaly frame index)
+        frames_since_last_anomaly = frame_id - (self._last_anomaly_frame or frame_id)
         if frames_since_last_anomaly >= self.post_event_frames:
             return self._finalize_event(frame_id)
 

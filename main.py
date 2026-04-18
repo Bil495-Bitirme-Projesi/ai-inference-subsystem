@@ -35,9 +35,9 @@ from source.engine.inference_factory import InferenceFactory
 from source.engine.inference_service import InferenceService
 from source.recording import ClipUploader
 
+from source.engine.vlm_engine import VADInferenceEngine  # noqa: F401s
 # VideoMAE engine'i factory'ye kaydetmek için import et
 # (@register_inference_engine decorator'ı import sırasında çalışır)
-import source.engine.videomae_engine  # noqa: F401
 
 
 def setup_logging():
@@ -58,7 +58,7 @@ def main():
 
     # AI Engine — model bir kez yüklenir, tüm kameralar paylaşır
     logger.info("Loading AI inference engine...")
-    raw_engine = InferenceFactory.create("VideoMAE", "config/videomae_cfg.json")
+    raw_engine = InferenceFactory.create("VLMEngine", "config/vlm_cfg.json")
     engine = InferenceService(raw_engine)
     logger.info(f"Engine ready on device: {engine.device}")
 
@@ -80,7 +80,7 @@ def main():
         engine=engine,
         dispatcher=dispatcher,
         sequence_length=16,
-        stride=1,
+        stride=4,
     )
 
     # WebSocket Client — CMS ile konfigürasyon senkronizasyonu

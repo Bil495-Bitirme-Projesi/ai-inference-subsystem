@@ -122,9 +122,8 @@ class StreamIngestor(Thread):
 
                     # List[np.ndarray] -> torch.Tensor (T, H, W, C)
                     seq_tensor = torch.stack([torch.from_numpy(f) for f in frames])
-                    # (T, H, W, C) -> (T, C, H, W) -> (B, T, C, H, W)
-                    seq_tensor = seq_tensor.permute(0, 3, 1, 2).unsqueeze(0)
-
+                    self.logger.info(f"Camera {self.cameraId}: Sequence tensor shape: {seq_tensor.shape}")
+                    
                     # Inference (InferenceService üzerinden thread-safe)
                     results = self.inference_engine.predict(seq_tensor)
 

@@ -26,7 +26,7 @@ class ResultDispatcher(IDispatcher):
         Her inference sonucu için çağrılır — sadece loglama yapar.
         """
         time_range = f"[{info.get('start_sec')}s - {info.get('end_sec')}s]"
-        print(f"\n[DISPATCH] {time_range} Results: {detections}")
+        print(f"\n[DISPATCH] {time_range} Results: {detections} \n")
 
     def dispatch_event(self, clip_request: EventClipRequest, clip_path: str) -> bool:
         """
