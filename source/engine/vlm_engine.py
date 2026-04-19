@@ -9,6 +9,9 @@ import logging
 from typing import List, Optional, Dict, Any
 from contextlib import contextmanager
 
+import torch
+import gc
+
 try:
     from PIL.Image import Image
 except ImportError:
@@ -62,7 +65,7 @@ class VADInferenceEngine(IInferenceEngine):
             raise
     
     def _initialize_engine(self):
-        """Initialize the actual VAD engine."""            
+        """Initialize the actual VAD engine."""              
         self._engine = VADEngine(
             use_memory=self.use_memory,
             model_path=self.model_path,

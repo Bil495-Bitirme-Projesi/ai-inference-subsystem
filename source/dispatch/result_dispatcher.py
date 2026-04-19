@@ -25,8 +25,12 @@ class ResultDispatcher(IDispatcher):
         """
         Her inference sonucu için çağrılır — sadece loglama yapar.
         """
+        label = detections.get("predicted_label", "Unknown")
+        prob = detections.get("prob") or detections.get("probs") or 0.0
         time_range = f"[{info.get('start_sec')}s - {info.get('end_sec')}s]"
-        print(f"\n[DISPATCH] {time_range} Results: {detections} \n")
+        
+        # Daha temiz log çıktısı
+        self.logger.info(f"Batch {time_range} -> Prediction: {label} (confidence: {prob})")
 
     def dispatch_event(self, clip_request: EventClipRequest, clip_path: str) -> bool:
         """

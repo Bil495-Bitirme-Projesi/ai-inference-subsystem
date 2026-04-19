@@ -1,3 +1,4 @@
+from source.proc import sequence_buf
 from .streamer import Streamer
 from threading import Thread
 import torch
@@ -72,6 +73,7 @@ class StreamIngestor(Thread):
     def _process_loop(self):
         fps = self.streamer.fps if self.streamer.fps > 0 else 30.0
         frame_count = 0
+        local_frame_id = 0  # Local counter for consistent frame indexing
 
         self.logger.info(f"Processing loop started for camera {self.cameraId} (fps={fps})")
 
@@ -84,7 +86,7 @@ class StreamIngestor(Thread):
                         break
                     continue
 
-                frame_id, raw_frame = data
+                stream_frame_id, raw_frame = data
                 frame_count += 1
 
                 if frame_count == 1:
@@ -94,22 +96,25 @@ class StreamIngestor(Thread):
                     )
 
                 # 1) Ham kareyi RecordBuffer'a ekle (pre-event ring buffer)
-                self.record_buffer.add_frame(frame_id, raw_frame)
+                self.record_buffer.add_frame(local_frame_id, raw_frame)
 
                 # 2) Anomali kaydı aktifse, kareyi canlı diske yaz
                 if self.live_recorder.is_recording:
-                    self.live_recorder.add_frame(frame_id, raw_frame)
+                    self.live_recorder.add_frame(local_frame_id, raw_frame)
 
-                # 3) İşlenmiş kareyi SequenceBuffer'a ekle (inference için)
+                # 3) İşlenmiş kareyi SequenceBuffer'a ekle (stride sampling yapılır)
                 processed = self.preprocessor.process(raw_frame)
-                self.sequence_buffer.add_frame(frame_id, processed)
-
-                if self.sequence_buffer.is_ready():
+                was_added = self.sequence_buffer.add_frame(local_frame_id, processed)
+                
+                # Sadece stride sampling sonrasında sequence kontrol et
+                if was_added and self.sequence_buffer.is_ready():
                     seq_data = self.sequence_buffer.get_sequence()
 
                     # İndeksleri ve kareleri ayır
                     indices = [item[0] for item in seq_data]
                     frames = [item[1] for item in seq_data]
+
+                    self.logger.info(f"Sequence indices (stride-sampled): {indices}")
 
                     # Zaman aralığını hesapla
                     start_sec = indices[0] / fps
@@ -127,6 +132,9 @@ class StreamIngestor(Thread):
                     # Inference (InferenceService üzerinden thread-safe)
                     results = self.inference_engine.predict(seq_tensor)
 
+                    self.sequence_buffer.flush()   
+                    self.logger.info(f"Camera {self.cameraId}: Cleared frame queue.")
+
                     meta_info = {
                         "start_sec": round(start_sec, 2),
                         "end_sec": round(end_sec, 2),
@@ -139,18 +147,26 @@ class StreamIngestor(Thread):
 
                     # Anomali state machine'i güncelle
                     prev_state = self.anomaly_tracker.state
-                    clip_request = self.anomaly_tracker.update(results, frame_id)
+                    clip_request = self.anomaly_tracker.update(results, local_frame_id)
 
                     # IDLE → ACTIVE geçişi: canlı kayda başla
                     if (
-                        prev_state == AnomalyTracker.IDLE
-                        and self.anomaly_tracker.state == AnomalyTracker.ACTIVE
+                        prev_state == self.anomaly_tracker.IDLE
+                        and self.anomaly_tracker.state == self.anomaly_tracker.ACTIVE
                     ):
-                        self._start_live_recording(frame_id, fps)
+                        self._start_live_recording(local_frame_id, fps)
 
                     # Olay tamamlandı: kaydı bitir
-                    if clip_request:
+                    if clip_request is not None:
+                        was_chained = self.anomaly_tracker.state == self.anomaly_tracker.ACTIVE        
                         self._handle_completed_event(clip_request)
+                        
+                        # Chained event (max duration) ise hemen yeni segment kaydını başlat
+                        if was_chained:
+                            self.logger.info(f"Camera {self.cameraId}: Starting next segment (chained).")
+                            self._start_live_recording(local_frame_id, fps)
+
+                local_frame_id += 1  # Increment after processing
 
             except Exception as e:
                 self.logger.error(

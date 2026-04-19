@@ -66,11 +66,12 @@ class AnomalyTracker:
         self,
         normal_label: str = "Normal",
         threshold: float = 0.0,
-        pre_event_seconds: float = 5.0,
-        post_event_seconds: float = 5.0,
-        cooldown_seconds: float = 10.0,
+        pre_event_seconds: float = 0.0,
+        post_event_seconds: float = 0.0,
+        cooldown_seconds: float = 0.0,
+        max_event_seconds: float = 20.0,
         fps: float = 30.0,
-        smoothing_alpha: float = 0.4,
+        smoothing_alpha: float = 0.8,
     ):
         """
         Args:
@@ -80,6 +81,9 @@ class AnomalyTracker:
             pre_event_seconds:  Anomali öncesi klibe dahil edilecek süre (saniye).
             post_event_seconds: Anomali sonrası klibe dahil edilecek süre (saniye).
             cooldown_seconds:   İki olay arasındaki minimum bekleme süresi (saniye).
+            max_event_seconds:  Bir olayın ACTIVE state'te kalabileceği maksimum süre.
+                                Limit dolunca olay finalize edilir; anomali devam
+                                ediyorsa yeni olay otomatik chain edilir.
             fps:                Videonun kare hızı (zamanlama hesapları için).
         """
         self.normal_label = normal_label
@@ -88,6 +92,7 @@ class AnomalyTracker:
         self.pre_event_frames = int(pre_event_seconds * fps)
         self.post_event_frames = int(post_event_seconds * fps)
         self.cooldown_frames = int(cooldown_seconds * fps)
+        self.max_event_frames = int(max_event_seconds * fps)
 
         # Exponential moving average for smoothing anomaly scores (to avoid jitter)
         # ema_{t} = alpha * raw_score_t + (1-alpha) * ema_{t-1}
@@ -127,9 +132,10 @@ class AnomalyTracker:
             Olay tamamlandıysa EventClipRequest, devam ediyorsa/yoksa None.
         """
         label = prediction.get("predicted_label", self.normal_label)
-        # support both numeric and string probability formats
+        # support both numeric and string probability formats, and both "prob" and "probs" keys
         try:
-            score = float(prediction.get("probs", 0))
+            val = prediction.get("prob") or prediction.get("probs") or 0.0
+            score = float(val)
         except Exception:
             score = 0.0
         description = prediction.get("description", "")
@@ -145,8 +151,8 @@ class AnomalyTracker:
         alpha = max(0.0, min(1.0, self.smoothing_alpha))
         self._ema_score = alpha * raw_score + (1.0 - alpha) * self._ema_score
 
-        # smoothed anomaly decision
-        is_anomaly = self._ema_score >= self.threshold
+        # smoothed anomaly decision (use > to exclude threshold boundary)
+        is_anomaly = self._ema_score > self.threshold
 
         if self.state == self.IDLE:
             return self._handle_idle(is_anomaly, label, score, description, frame_id)
@@ -167,6 +173,7 @@ class AnomalyTracker:
         self.pre_event_frames = int(self.pre_event_frames * ratio)
         self.post_event_frames = int(self.post_event_frames * ratio)
         self.cooldown_frames = int(self.cooldown_frames * ratio)
+        self.max_event_frames = int(self.max_event_frames * ratio)
 
     # ------------------------------------------------------------------ #
     #  State handlers
@@ -178,12 +185,15 @@ class AnomalyTracker:
         # from the latest non-normal observation (if available).
         if is_anomaly and self._cooldown_ok(frame_id):
             chosen_label = self._last_non_normal_label or label
+            
             # Yeni olay başladı
             self.state = self.ACTIVE
             self._event_start_frame = frame_id
             self._last_anomaly_frame = frame_id
-            self._max_score = score
-            self._description = description
+            
+            # Only set max_score and description from non-normal frames
+            self._max_score = score if label != self.normal_label else 0.0
+            self._description = description if label != self.normal_label else ""
             self._type_counts = {chosen_label: 1}
             self._detection_count = 1
             self._event_timestamp = datetime.now(timezone.utc).isoformat()
@@ -195,10 +205,52 @@ class AnomalyTracker:
 
     def _handle_active(self, is_anomaly, label, score, description, frame_id):
         """ACTIVE durumunda: anomali devam ediyor veya durdu (EMA bazlı)."""
+        # ── Max-duration kontrolü ──────────────────────────────────────
+        # Sürekli anomalilerde kaydın sınırsız büyümesini engeller.
+        # Limit dolunca mevcut olay finalize edilir; anomali hâlâ
+        # devam ediyorsa yeni bir olay otomatik olarak chain edilir.
+        # Note: Total clip = pre_event + event + post_event.
+        # We contr
+        # ol event portion only, but total should stay within reasonable bounds.
+        start = self._event_start_frame if self._event_start_frame is not None else frame_id
+        event_duration = frame_id - start
+        # Effective max includes pre_event buffer that will be added when recording starts
+        effective_max_frames = self.max_event_frames + self.pre_event_frames
+        if event_duration >= effective_max_frames:
+            self.logger.info(
+                f"Max event duration reached at frame {frame_id} "
+                f"(event_duration={event_duration} frames, "
+                f"effective_max={effective_max_frames} frames)."
+            
+            )
+            
+            clip_request = self._finalize_event(frame_id)
+
+            # Anomali devam ediyorsa → yeni olay chain et (gap-free)
+            # Only chain if current frame has non-normal label (not just EMA smoothing)
+            if is_anomaly and label != self.normal_label:
+                chosen_label = label
+                self.state = self.ACTIVE
+                self._event_start_frame = frame_id
+                self._last_anomaly_frame = frame_id
+                # Only set max_score and description from non-normal frames
+                self._max_score = score
+                self._description = description
+                self._type_counts = {chosen_label: 1}
+                self._detection_count = 1
+                self._event_timestamp = datetime.now(timezone.utc).isoformat()
+                self.logger.info(
+                    f"Max duration reached — event chained at frame {frame_id} (seconds={frame_id/self.fps:.2f})"
+                )
+
+            return clip_request
+
+        # ── Normal akış ────────────────────────────────────────────────
         if is_anomaly:
             # Olay devam ediyor — istatistikleri güncelle
             self._last_anomaly_frame = frame_id
-            if score > self._max_score:
+            # Only update max_score from non-normal frames (exclude normal label scores)
+            if label != self.normal_label and score > self._max_score:
                 self._max_score = score
                 self._description = description
             # Update counts using raw label if available, otherwise use last_non_normal
@@ -220,7 +272,8 @@ class AnomalyTracker:
             # Anomali geri döndü — aynı olay devam ediyor
             self.state = self.ACTIVE
             self._last_anomaly_frame = frame_id
-            if score > self._max_score:
+            # Only update max_score from non-normal frames (exclude normal label scores)
+            if label != self.normal_label and score > self._max_score:
                 self._max_score = score
                 self._description = description
             used_label = label if label != self.normal_label else (self._last_non_normal_label or label)
@@ -232,8 +285,16 @@ class AnomalyTracker:
             return None
 
         # Post-event süresi doldu mu kontrol et (use last anomaly frame index)
-        frames_since_last_anomaly = frame_id - (self._last_anomaly_frame or frame_id)
-        if frames_since_last_anomaly >= self.post_event_frames:
+        last = self._last_anomaly_frame if self._last_anomaly_frame is not None else frame_id
+        frames_since_last_anomaly = frame_id - last
+        
+        # Also apply max total duration constraint: prevent event from running indefinitely
+        # even during post-wait (total = event + post should not exceed max + post)
+        start = self._event_start_frame if self._event_start_frame is not None else frame_id
+        total_duration = frame_id - start
+        effective_max_total = self.max_event_frames + self.post_event_frames
+        
+        if frames_since_last_anomaly >= self.post_event_frames or total_duration >= effective_max_total:
             return self._finalize_event(frame_id)
 
         return None
@@ -256,7 +317,7 @@ class AnomalyTracker:
             description=self._description,
             start_frame=self._event_start_frame,
             end_frame=current_frame,
-            pre_event_frames=self.pre_event_frames,
+            pre_event_frames=0,
             total_clip_frames=total_clip,
             timestamp=self._event_timestamp,
             detection_count=self._detection_count,

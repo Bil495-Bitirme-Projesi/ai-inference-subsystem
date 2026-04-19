@@ -224,7 +224,7 @@ class TestInferenceResultScoring:
 
     def test_anomaly_detection_transitions_to_active(self):
         """Eşiğin üzerinde anomali skoru geldiğinde IDLE → ACTIVE geçişi olmalı."""
-        tracker = AnomalyTracker(threshold=0.5)
+        tracker = AnomalyTracker(threshold=0.5, smoothing_alpha=1.0, normal_label="Normal Videos")
         assert tracker.state == "IDLE"
 
         prediction = {
@@ -240,7 +240,7 @@ class TestInferenceResultScoring:
 
     def test_below_threshold_stays_idle(self):
         """Eşiğin altında anomali skoru geldiğinde IDLE'da kalmalı."""
-        tracker = AnomalyTracker(threshold=0.95)
+        tracker = AnomalyTracker(threshold=0.95, smoothing_alpha=1.0, normal_label="Normal Videos")
 
         prediction = {
             "predicted_label": "Fighting",
@@ -255,7 +255,7 @@ class TestInferenceResultScoring:
 
     def test_normal_label_stays_idle(self):
         """Normal label geldiğinde her zaman IDLE kalmalı."""
-        tracker = AnomalyTracker(threshold=0.0)
+        tracker = AnomalyTracker(threshold=0.5, smoothing_alpha=1.0, normal_label="Normal Videos")
 
         prediction = {
             "predicted_label": "Normal Videos",
@@ -273,6 +273,8 @@ class TestInferenceResultScoring:
             pre_event_seconds=1,
             post_event_seconds=0.1,  # 3 frame (çok kısa)
             fps=30.0,
+            smoothing_alpha=1.0,
+            normal_label="Normal Videos",
         )
 
         anomaly = {"predicted_label": "Fighting", "probs": "0.90", "description": "test"}
@@ -293,6 +295,41 @@ class TestInferenceResultScoring:
         assert isinstance(clip_request, EventClipRequest)
         assert clip_request.event_type == "Fighting"
         assert clip_request.max_score == 0.90
+
+    def test_max_duration_forces_finalization(self):
+        """max_event_seconds dolduğunda olay finalize edilmeli ve anomali devam
+        ediyorsa yeni olay chain edilmeli (state ACTIVE kalmalı)."""
+        tracker = AnomalyTracker(
+            threshold=0.5,
+            max_event_seconds=1.0,   # 30 frame @ 30fps
+            pre_event_seconds=0,
+            post_event_seconds=0,
+            fps=30.0,
+            smoothing_alpha=1.0,
+            normal_label="Normal Videos",
+        )
+
+        anomaly = {"predicted_label": "Fighting", "probs": "0.90", "description": "test"}
+
+        # IDLE → ACTIVE
+        tracker.update(anomaly, frame_id=0)
+        assert tracker.state == "ACTIVE"
+
+        # Feed continuous anomaly up to just before max limit (29 frames)
+        clip_request = None
+        for fid in range(1, 30):
+            clip_request = tracker.update(anomaly, frame_id=fid)
+        assert clip_request is None, "Should not finalize before max_event_frames"
+
+        # Frame 30: exactly at max limit → should finalize and chain
+        clip_request = tracker.update(anomaly, frame_id=30)
+        assert clip_request is not None, "Should finalize at max_event_frames"
+        assert isinstance(clip_request, EventClipRequest)
+        assert clip_request.event_type == "Fighting"
+        # Anomaly still active → state should be ACTIVE (chained)
+        assert tracker.state == "ACTIVE", (
+            f"Continuous anomaly should chain a new event, got {tracker.state}"
+        )
 
 
 # ================================================================== #

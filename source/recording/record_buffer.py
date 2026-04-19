@@ -71,6 +71,7 @@ class RecordBuffer:
         Buffer'ın sonundan (en güncel) *num_frames* kadar kareyi döndürür.
 
         Buffer'da istenen miktardan az kare varsa, mevcut tüm kareler döner.
+        Eğer num_frames=0 ise boş liste döner.
 
         Args:
             num_frames: İstenen kare sayısı.
@@ -79,6 +80,9 @@ class RecordBuffer:
         Returns:
             [(frame_id, raw_frame), ...] listesi — zaman sıralı.
         """
+        if num_frames == 0:
+            return []
+            
         with self._lock:
             frames = list(self._buffer)
 

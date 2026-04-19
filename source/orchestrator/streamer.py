@@ -100,6 +100,7 @@ class Streamer(Thread):
                 last_time = time.time()
 
             ret, frame = self.cap.read()
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if ret else None
             if not ret:
                 if self._is_file:
                     self.logger.info("Video file ends.")

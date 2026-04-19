@@ -16,6 +16,15 @@ Kullanım:
     uv run main.py
 """
 
+# CUDA + vLLM fork issue fix: MUST set 'spawn' BEFORE any torch/vllm imports
+# vLLM ignores mp.set_start_method(); it reads its own env var instead.
+import os
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+import multiprocessing as mp
+if __name__ == '__main__':
+    mp.set_start_method('spawn', force=True)
+
 import sys
 import signal
 import logging
@@ -35,7 +44,7 @@ from source.engine.inference_factory import InferenceFactory
 from source.engine.inference_service import InferenceService
 from source.recording import ClipUploader
 
-from source.engine.vlm_engine import VADInferenceEngine  # noqa: F401s
+from source.engine.vlm_engine import VADInferenceEngine
 # VideoMAE engine'i factory'ye kaydetmek için import et
 # (@register_inference_engine decorator'ı import sırasında çalışır)
 
@@ -49,7 +58,7 @@ def setup_logging():
     )
 
 
-def main():
+def main():    
     setup_logging()
     logger = logging.getLogger("AIS")
     logger.info("=" * 50)
@@ -58,6 +67,7 @@ def main():
 
     # AI Engine — model bir kez yüklenir, tüm kameralar paylaşır
     logger.info("Loading AI inference engine...")
+        
     raw_engine = InferenceFactory.create("VLMEngine", "config/vlm_cfg.json")
     engine = InferenceService(raw_engine)
     logger.info(f"Engine ready on device: {engine.device}")

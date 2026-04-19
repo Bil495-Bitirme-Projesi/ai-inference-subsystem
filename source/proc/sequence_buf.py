@@ -77,3 +77,6 @@ class SequenceBuffer:
     def get_frame_count(self):
         """Buffer'da mevcut frame sayısını döndürür."""
         return len(self.buffer)
+
+    def flush(self):
+        self.buffer.clear()
